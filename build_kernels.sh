@@ -3,8 +3,8 @@
 
 if [ ! -d /home/runner/work ];then
 	NTHREADS=$(nproc)
-	MOK_KEY=MOK.priv
-	MOK_CERT=MOK.cer
+	MOK_KEY=MOK.key
+	MOK_CERT=MOK.crt
 else
 	NTHREADS=$(($(nproc)*4))
 	MOK_KEY=/persist/keys/MOK.priv

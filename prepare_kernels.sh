@@ -134,6 +134,7 @@ main(){
 			download_and_patch_kernels ${@:-6.12}
 			;;
 		*)
+			download_and_patch_kernels ${command:-6.12}
 			;;
 	esac
 }

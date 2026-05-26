@@ -18,7 +18,7 @@ fi
 for kernel in $kernels; do
 
     if [ ! -f "./kernels/$kernel/out/arch/x86/boot/bzImage" ];then
-        echo "The kernel $kernel has to be built first"
+        echo "The kernel $kernel has to be build first"
         exit 1
     fi
 
