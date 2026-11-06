@@ -1,0 +1,13 @@
+diff --git a/drivers/hid/i2c-hid/i2c-hid-core.c b/drivers/hid/i2c-hid/i2c-hid-core.c
+index bcca89ef7..0ed72b423 100644
+--- a/drivers/hid/i2c-hid/i2c-hid-core.c
++++ b/drivers/hid/i2c-hid/i2c-hid-core.c
+@@ -143,6 +143,8 @@ static const struct i2c_hid_quirks {
+ 		 I2C_HID_QUIRK_BOGUS_IRQ },
+ 	{ I2C_VENDOR_ID_GOODIX, I2C_DEVICE_ID_GOODIX_0D42,
+ 		 I2C_HID_QUIRK_DELAY_WAKEUP_AFTER_RESUME },
++	/* Xiaomi Mi Pad 2 touchscreen */
++	{ 0x2808, 0x509c, I2C_HID_QUIRK_BAD_INPUT_SIZE },
+ 	{ 0, 0 }
+ };
+ 
