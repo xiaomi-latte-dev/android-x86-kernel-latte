@@ -1,5 +1,5 @@
 #!/bin/bash
-. ./prepare_kernels.sh
+. ./kernel_info.sh
 
 if [ ! -d /home/runner/work ];then
 	NTHREADS=$(nproc)

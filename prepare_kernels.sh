@@ -1,5 +1,7 @@
 #!/bin/bash
 
+. ./kernel_info.sh
+
 NORMAL_COLOR='\e[0m'
 BLUE_COLOR='\e[1;34m'
 GREEN_COLOR='\e[1;32m'
@@ -49,18 +51,29 @@ make_config()
 download_kernel(){
 	kernel_remote_path=${kernel_info["$kernel,url"]}
 	kernel_remote_branch=${kernel_info["$kernel,branch"]}
+	kernel_remote_commit=${kernel_info["$kernel,commit"]}
 	echo -e "${BLUE_COLOR}kernel_remote_path   = $kernel_remote_path$NORMAL_COLOR"
 	echo -e "${BLUE_COLOR}kernel_remote_branch = $kernel_remote_branch$NORMAL_COLOR"
+	echo -e "${BLUE_COLOR}kernel_remote_commit = ${kernel_remote_commit:-<branch head>}$NORMAL_COLOR"
 
-	git clone --depth=1 --single-branch $kernel_remote_path -b $kernel_remote_branch --recursive ./kernels/$kernel || { echo -e "${RED_COLOR}Download kernel $kernel failed!$NORMAL_COLOR"; exit 1; }
+	if [ -n "$kernel_remote_commit" ]; then
+		# 按 commit id 克隆：分支后续提交可能对应不同的 Android 版本，锁定提交才可复现
+		git init -q ./kernels/$kernel
+		git -C ./kernels/$kernel remote add origin "$kernel_remote_path"
+		git -C ./kernels/$kernel fetch --depth=1 origin "$kernel_remote_commit" || { echo -e "${RED_COLOR}Download kernel $kernel commit $kernel_remote_commit failed!$NORMAL_COLOR"; exit 1; }
+		git -C ./kernels/$kernel checkout -q FETCH_HEAD || { echo -e "${RED_COLOR}Kernel $kernel commit $kernel_remote_commit checkout failed!$NORMAL_COLOR"; exit 1; }
+		git -C ./kernels/$kernel submodule update --init --recursive || { echo -e "${RED_COLOR}Kernel $kernel submodule update failed!$NORMAL_COLOR"; exit 1; }
+	else
+		git clone --depth=1 --single-branch $kernel_remote_path -b $kernel_remote_branch --recursive ./kernels/$kernel || { echo -e "${RED_COLOR}Download kernel $kernel failed!$NORMAL_COLOR"; exit 1; }
+	fi
 
-	# 对于没有ksu内核，集成SukiSU-Ultra。非GKI模式
+	# 对于没有ksu内核，集成BakaSU。非GKI模式
 	ksu=${kernel_info["$kernel,ksu"]}
 	if [ "$ksu" == "true" ];then
-		echo -e "${BLUE_COLOR}Kernel $kernel is not KernelSU kernel, SukiSU-Ultra integration$NORMAL_COLOR"
+		echo -e "${BLUE_COLOR}Kernel $kernel is not KernelSU kernel, BakaSU integration$NORMAL_COLOR"
 		pushd ./kernels/$kernel
 		rm -rf ./KernelSU
-		curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash
+		curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash
 		popd
 	fi
 }
@@ -95,26 +108,6 @@ clean_kernel(){
 	done
 }
 
-GITHUB_URL=https://github.com
-
-declare -A kernel_info=(
-	["5.10,url"]=$GITHUB_URL/android-generic/kernel_common
-	["5.10,branch"]="kernel-5.10.70"
-	["5.10,ksu"]="true"
-	["5.10,llvm"]="false"
-	["5.15,url"]=$GITHUB_URL/android-generic/kernel_common
-	["5.15,branch"]="umbral-20230901"
-	["5.15,llvm"]="false"
-	["6.1,url"]=$GITHUB_URL/android-generic/kernel_common
-	["6.1,branch"]="hm/gloria"
-	["6.6,url"]=$GITHUB_URL/android-generic/kernel_common
-	["6.6,branch"]="hm/crimson"
-	["6.12,url"]=$GITHUB_URL/android-generic/kernel-zenith
-	["6.12,branch"]="6.12"
-	["6.15,url"]=$GITHUB_URL/android-generic/kernel-zenith
-	["6.15,branch"]="6.15"
-)
-
 main(){
 	command="$1"
 	shift
@@ -139,10 +132,4 @@ main(){
 	esac
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-    # echo "模式：直接执行 (Executed)"
-    main $@
-else
-    # echo "模式：Source 导入 (Sourced)"
-	true
-fi
+main "$@"

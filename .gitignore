@@ -2,3 +2,4 @@ kernels
 out
 tmp
 MOK.*
+.config-diff/
