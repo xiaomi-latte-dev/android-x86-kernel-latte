@@ -1,12 +1,24 @@
 diff --git a/drivers/platform/x86/x86-android-tablets/other.c b/drivers/platform/x86/x86-android-tablets/other.c
-index 76d008a15..e0c688d39 100644
+index 165386ea3..7edf4d2c5 100644
 --- a/drivers/platform/x86/x86-android-tablets/other.c
 +++ b/drivers/platform/x86/x86-android-tablets/other.c
-@@ -684,8 +684,37 @@ static int xiaomi_mipad2_brightness_set(struct led_classdev *led_cdev,
- 	return pwm_apply_might_sleep(xiaomi_mipad2_led_pwm, &state);
+@@ -10,6 +10,7 @@
+ 
+ #include <linux/acpi.h>
+ #include <linux/gpio/machine.h>
++#include <linux/i2c.h>
+ #include <linux/input.h>
+ #include <linux/leds.h>
+ #include <linux/platform_device.h>
+@@ -722,8 +723,51 @@ static void __init xiaomi_mipad2_init_touch_led(struct device *dev)
+ 		dev_warn(dev, "registering LED: %d\n", ret);
  }
  
-+/* 小米平板2没有设备树提供这些信息。ACPI只注册了这个设备 */
++/*
++ * Mi Pad 2 has no devicetree providing the CODEC info; the RT5659 is only
++ * enumerated through ACPI. The ACPI node lacks the jack-detect source
++ * property, so provide it through a software node.
++ */
 +static const struct software_node rt5659_swnode = {
 +	.name = "rt5659",
 +	.properties = (const struct property_entry[]) {
@@ -17,64 +29,71 @@ index 76d008a15..e0c688d39 100644
 +
 +static int match_rt5659_client(struct device *dev, const void *data)
 +{
-+	struct acpi_device *adev;
-+
-+	/* 1. 检查设备名是否为 RT5659 */
 +	if (!strstr(dev_name(dev), "10EC5659"))
 +		return 0;
 +
-+	/* 2. 获取 ACPI parent device */
-+	/* 直接假设 parent 是 ACPI device（ACPI 创建的 I2C client 必然如此） */
-+	adev = to_acpi_device(dev->parent);
-+	if (!adev)
++	/* ACPI enumerated I2C clients always have an ACPI device as parent */
++	if (!to_acpi_device(dev->parent))
 +		return 0;
 +
-+	dev_dbg(dev, "[match_rt5659_client]: is acpi device\n");
 +	return 1;
 +}
++
++/*
++ * The RT5659 swnode can only be attached as secondary fwnode, but
++ * gpiod_get_index() only passes the primary fwnode to the gpio lookup, so
++ * PROPERTY_ENTRY_GPIO() would not be found. Use a name based lookup table
++ * instead: dev_id is the ACPI generated I2C client name and the providers
++ * are the Cherryview ACPI gpiochips.
++ */
++static struct gpiod_lookup_table xiaomi_mipad2_codec_rt5659_gpios = {
++	.dev_id = "i2c-10EC5659:01",
++	.table = {
++		GPIO_LOOKUP("INT33FF:00", 593 - 512, "ldo1-en", GPIO_ACTIVE_HIGH),
++		GPIO_LOOKUP("INT33FF:01", 656 - 610, "reset", GPIO_ACTIVE_HIGH),
++		{ }
++	},
++};
 +
  static int __init xiaomi_mipad2_init(struct device *dev)
  {
 +	struct device *client_dev;
 +	struct i2c_client *client;
- 	struct led_classdev *led_cdev;
  	int ret;
  
-@@ -712,12 +741,31 @@ static int __init xiaomi_mipad2_init(struct device *dev)
+ 	xiaomi_mipad2_init_touch_led(dev);
+@@ -732,11 +776,30 @@ static int __init xiaomi_mipad2_init(struct device *dev)
  	if (ret)
  		return dev_err_probe(dev, ret, "registering node_group\n");
  
 +	ret = software_node_register(&rt5659_swnode);
 +	if (ret)
-+		return ret;
++		goto err_unregister_ktd2026;
 +
-+	/* 在 I2C bus 上查找 RT5659 client */
 +	client_dev = bus_find_device(&i2c_bus_type, NULL, NULL, match_rt5659_client);
 +	if (!client_dev) {
-+		pr_err("RT5659 I2C client not found\n");
-+		goto END;
++		dev_warn(dev, "RT5659 I2C client not found\n");
++		return 0;
 +	}
 +
 +	client = to_i2c_client(client_dev);
 +	set_secondary_fwnode(&client->dev, software_node_fwnode(&rt5659_swnode));
-+
 +	put_device(client_dev);
-+	pr_info("Bound software node to RT5659\n");
 +
-+END:
  	return 0;
++
++err_unregister_ktd2026:
++	software_node_unregister_node_group(ktd2026_node_group);
++	return ret;
  }
  
  static void xiaomi_mipad2_exit(void)
  {
- 	software_node_unregister_node_group(ktd2026_node_group);
 +	software_node_unregister(&rt5659_swnode);
+ 	software_node_unregister_node_group(ktd2026_node_group);
  }
  
- /*
-@@ -746,12 +794,43 @@ static const struct x86_i2c_client_info xiaomi_mipad2_i2c_clients[] __initconst
- 			.swnode = &ktd2026_node,
- 		},
+@@ -769,9 +832,31 @@ static const struct x86_i2c_client_info xiaomi_mipad2_i2c_clients[] __initconst
  		.adapter_path = "\\_SB_.PCI0.I2C3",
 +	}, {
 +		/* TFA9890A audio amplifier */
@@ -95,104 +114,77 @@ index 76d008a15..e0c688d39 100644
  	},
  };
  
-+static struct gpiod_lookup_table xiaomi_mipad2_codec_rt5659_gpios = {
-+	.dev_id = "i2c-10EC5659:01",
-+	.table = {
-+		GPIO_LOOKUP("INT33FF:00", 593 - 512, "ldo1-en", GPIO_ACTIVE_HIGH),
-+		GPIO_LOOKUP("INT33FF:01", 656 - 610, "reset", GPIO_ACTIVE_HIGH),
-+		{ }
-+	},
-+};
-+
-+static struct gpiod_lookup_table * const xiaomi_mipad2_gpios[] = {
++static struct gpiod_lookup_table * const xiaomi_mipad2_gpio_lookup_tables[] = {
 +	&xiaomi_mipad2_codec_rt5659_gpios,
 +	NULL
 +};
 +
  const struct x86_dev_info xiaomi_mipad2_info __initconst = {
++	.gpiod_lookup_tables = xiaomi_mipad2_gpio_lookup_tables,
  	.i2c_client_info = xiaomi_mipad2_i2c_clients,
  	.i2c_client_count = ARRAY_SIZE(xiaomi_mipad2_i2c_clients),
  	.init = xiaomi_mipad2_init,
- 	.exit = xiaomi_mipad2_exit,
-+	.gpiod_lookup_tables = xiaomi_mipad2_gpios,
- };
+
 diff --git a/sound/soc/codecs/rt5659.c b/sound/soc/codecs/rt5659.c
-index a061028a1..6ac097775 100644
+index a061028a1..c5be39f2d 100644
 --- a/sound/soc/codecs/rt5659.c
 +++ b/sound/soc/codecs/rt5659.c
-@@ -1135,7 +1135,7 @@ static bool rt5659_readable_register(struct device *dev, unsigned int reg)
+@@ -1135,7 +1135,8 @@ static bool rt5659_readable_register(struct device *dev, unsigned int reg)
  
  static const DECLARE_TLV_DB_SCALE(hp_vol_tlv, -2325, 75, 0);
  static const DECLARE_TLV_DB_SCALE(out_vol_tlv, -4650, 150, 0);
 -static const DECLARE_TLV_DB_SCALE(dac_vol_tlv, -65625, 375, 0);
++/* 音量修复：上游值域过大（-65625, 375），Mi Pad 2 实测只有 -13125/75 步进可听 */
 +static const DECLARE_TLV_DB_SCALE(dac_vol_tlv, -13125, 75, 0);
  static const DECLARE_TLV_DB_SCALE(in_vol_tlv, -3450, 150, 0);
  static const DECLARE_TLV_DB_SCALE(adc_vol_tlv, -17625, 375, 0);
  static const DECLARE_TLV_DB_SCALE(adc_bst_tlv, 0, 1200, 0);
-@@ -1329,9 +1329,19 @@ static int rt5659_button_detect(struct snd_soc_component *component)
- static irqreturn_t rt5659_irq(int irq, void *data)
+@@ -1330,8 +1331,14 @@ static irqreturn_t rt5659_irq(int irq, void *data)
  {
  	struct rt5659_priv *rt5659 = data;
-+	int entry_is_empty = list_empty(&rt5659->jack_detect_work.work.entry);
  
 -	queue_delayed_work(system_power_efficient_wq,
 -			   &rt5659->jack_detect_work, msecs_to_jiffies(250));
-+	printk("rt5659 [%s]: jack_detect_work entry is empty: %s\n", __func__, entry_is_empty? "true":"false");
-+	if (!entry_is_empty) {
-+		printk("rt5659 [%s]: jack_detect_work func is %pS\n", __func__, rt5659->jack_detect_work.work.func);
-+	}
-+
-+	if (rt5659->pdata.jd_src == RT5659_JD_NULL) {
-+		printk("rt5659 [%s]: rt5659->pdata.jd_src = RT5659_JD_NULL, jack_detect_work not init.", __func__);
-+	} else {
++	/* Mi Pad 2 的 ACPI 不提供 realtek,jd-src，jd_src 为 RT5659_JD_NULL 时
++	 * jack_detect_work 从未被 INIT_DELAYED_WORK 初始化，无条件 queue 会操作
++	 * 未初始化的工作项。上游默认行为对这类板子不安全，故跳过。
++	 */
++	if (rt5659->pdata.jd_src != RT5659_JD_NULL) {
 +		queue_delayed_work(system_power_efficient_wq,
-+				&rt5659->jack_detect_work, msecs_to_jiffies(250));
++				   &rt5659->jack_detect_work, msecs_to_jiffies(250));
 +	}
  
  	return IRQ_HANDLED;
  }
+
 diff --git a/sound/soc/codecs/tfa989x.c b/sound/soc/codecs/tfa989x.c
-index 79847a90a..a3782fc09 100644
+index 79847a90a..6c9cb9938 100644
 --- a/sound/soc/codecs/tfa989x.c
 +++ b/sound/soc/codecs/tfa989x.c
 @@ -7,6 +7,7 @@
   * Copyright (C) 2013 Sony Mobile Communications Inc.
   */
  
-+#include "sound/soc-component.h"
++#include <linux/device.h>
  #include <linux/gpio/consumer.h>
  #include <linux/i2c.h>
  #include <linux/module.h>
-@@ -92,7 +93,7 @@ static const struct snd_soc_dapm_widget tfa989x_dapm_widgets[] = {
+@@ -92,7 +93,8 @@ static const struct snd_soc_dapm_widget tfa989x_dapm_widgets[] = {
  
  	SND_SOC_DAPM_MUX("Amp Input", SND_SOC_NOPM, 0, 0, &chsa_mux),
  	SND_SOC_DAPM_AIF_IN("AIFINL", "HiFi Playback", 0, SND_SOC_NOPM, 0, 0),
 -	SND_SOC_DAPM_AIF_IN("AIFINR", "HiFi Playback", 1, SND_SOC_NOPM, 0, 0),
++	/* rt5659 未区分通道 */
 +	SND_SOC_DAPM_AIF_IN("AIFINR", "HiFi Playback", 0, SND_SOC_NOPM, 0, 0),
  };
  
  static const struct snd_soc_dapm_route tfa989x_dapm_routes[] = {
-@@ -123,6 +124,16 @@ static int tfa989x_probe(struct snd_soc_component *component)
- {
- 	struct tfa989x *tfa989x = snd_soc_component_get_drvdata(component);
- 
-+	if (tfa989x->rev->rev == TFA9890_REVISION){
-+		const char* name = dev_name(component->dev);
-+		char id = name[13];
-+		if (id == '0') {
-+			component->name_prefix = "Left";
-+		} else if (id == '1') {
-+			component->name_prefix = "Right";
-+		}
-+	}
-+
- 	if (tfa989x->rev->rev == TFA9897_REVISION)
- 		return snd_soc_add_component_controls(component, tfa989x_mode_controls,
- 						      ARRAY_SIZE(tfa989x_mode_controls));
-@@ -171,8 +182,56 @@ static int tfa989x_hw_params(struct snd_pcm_substream *substream,
+@@ -171,8 +173,55 @@ static int tfa989x_hw_params(struct snd_pcm_substream *substream,
  					     sr << TFA989X_I2SREG_I2SSR);
  }
  
++/*****************************************************************************/
++/* Params masks */
 +#define TFA98XX_FORMAT_MASK		(0x7)
 +#define TFA98XX_FORMAT_LSB		(0x4)
 +#define TFA98XX_FORMAT_MSB		(0x2)
@@ -200,18 +192,14 @@ index 79847a90a..a3782fc09 100644
 +static int tfa989x_set_dai_fmt(struct snd_soc_dai *codec_dai, unsigned int fmt)
 +{
 +	struct snd_soc_component *component = codec_dai->component;
-+	//struct tfa989x *tfa989x = snd_soc_component_get_drvdata(component);
 +	u16 val;
-+
-+	pr_debug("\n");
-+	pr_info("tfa989x received fmt: %d\n",fmt);
 +
 +	/* set master/slave audio interface */
 +	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-+	case SND_SOC_DAIFMT_CBS_CFS:
++	case SND_SOC_DAIFMT_CBC_CFC:
 +		/* default value */
 +		break;
-+	case SND_SOC_DAIFMT_CBM_CFM:
++	case SND_SOC_DAIFMT_CBP_CFP:
 +	default:
 +		/* only supports Slave mode */
 +		pr_err("tfa989x: invalid DAI master/slave interface\n");
@@ -239,73 +227,66 @@ index 79847a90a..a3782fc09 100644
 +
 +	return 0;
 +}
++/*****************************************************************************/
 +
  static const struct snd_soc_dai_ops tfa989x_dai_ops = {
  	.hw_params = tfa989x_hw_params,
-+	.set_fmt = tfa989x_set_dai_fmt,
++	.set_fmt   = tfa989x_set_dai_fmt,
  };
  
  static struct snd_soc_dai_driver tfa989x_dai = {
-@@ -321,12 +380,21 @@ static int tfa989x_i2c_probe(struct i2c_client *i2c)
- 	struct tfa989x *tfa989x;
- 	struct regmap *regmap;
+@@ -323,7 +372,11 @@ static int tfa989x_i2c_probe(struct i2c_client *i2c)
  	unsigned int val;
-+	const char* name = dev_name(dev);
-+	char id[2];
  	int ret;
  
-+	snprintf(id, sizeof(id), "%c", name[13]);
-+	dev_dbg(&i2c->dev, "tfa989x:%s i2c addr is: %x \n", id, i2c->addr);
-+
- 	rev = device_get_match_data(dev);
+-	rev = device_get_match_data(dev);
++	/*
++	 * i2c_get_match_data() 在 device_get_match_data() 返回 NULL 时会回落到
++	 * id_table[].driver_data，因此 ACPI/手工创建的 client 也能拿到 rev。
++	 */
++	rev = i2c_get_match_data(i2c);
  	if (!rev) {
--		dev_err(dev, "unknown device revision\n");
--		return -ENODEV;
-+		if (strstr(name,"i2c-tfa9890")) {
-+			rev = &tfa9890_rev;
-+		} else {
-+			dev_err(dev, "unknown device revision\n");
-+			return -ENODEV;
-+		}
- 	}
- 
- 	tfa989x = devm_kzalloc(dev, sizeof(*tfa989x), GFP_KERNEL);
-@@ -399,6 +467,11 @@ static int tfa989x_i2c_probe(struct i2c_client *i2c)
- 	}
- 	regcache_cache_bypass(regmap, false);
- 
-+	if (!strcmp(id, "1")) {
-+		pr_info("tfa989x --> Right\n");
-+	}
-+	pr_info("tfa989x --> Left\n");
-+
- 	return devm_snd_soc_register_component(dev, &tfa989x_component,
+ 		dev_err(dev, "unknown device revision\n");
+ 		return -ENODEV;
+@@ -403,6 +456,13 @@ static int tfa989x_i2c_probe(struct i2c_client *i2c)
  					       &tfa989x_dai, 1);
  }
-@@ -411,12 +484,21 @@ static const struct of_device_id tfa989x_of_match[] = {
- };
- MODULE_DEVICE_TABLE(of, tfa989x_of_match);
  
 +static const struct i2c_device_id tfa989x_i2c_id[] = {
-+	{.name = "i2c-tfa9890", TFA9890_REVISION},
-+	{.name = "i2c-tfa9895", TFA9895_REVISION},
-+	{.name = "i2c-tfa9897", TFA9897_REVISION},
++	{ "tfa989x", (kernel_ulong_t)&tfa9890_rev },
++	{ "tfa9890", (kernel_ulong_t)&tfa9890_rev },
 +	{ }
 +};
 +MODULE_DEVICE_TABLE(i2c, tfa989x_i2c_id);
++
+ static const struct of_device_id tfa989x_of_match[] = {
+ 	{ .compatible = "nxp,tfa9890", .data = &tfa9890_rev },
+ 	{ .compatible = "nxp,tfa9895", .data = &tfa9895_rev },
+@@ -411,12 +471,21 @@ static const struct of_device_id tfa989x_of_match[] = {
+ };
+ MODULE_DEVICE_TABLE(of, tfa989x_of_match);
+ 
++static const struct acpi_device_id tfa9890_acpi_match[] = {
++	{ "NXP9890", (kernel_ulong_t)&tfa9890_rev },
++	{ "TFA9890", (kernel_ulong_t)&tfa9890_rev },
++	{ },
++};
++MODULE_DEVICE_TABLE(acpi, tfa9890_acpi_match);
 +
  static struct i2c_driver tfa989x_i2c_driver = {
  	.driver = {
  		.name = "tfa989x",
  		.of_match_table = tfa989x_of_match,
++		.acpi_match_table = tfa9890_acpi_match,
  	},
  	.probe = tfa989x_i2c_probe,
 +	.id_table = tfa989x_i2c_id,
  };
  module_i2c_driver(tfa989x_i2c_driver);
  
+
 diff --git a/sound/soc/intel/boards/Kconfig b/sound/soc/intel/boards/Kconfig
-index 033be4d3e..6bce05b28 100644
+index 033be4d3e..405cb017a 100644
 --- a/sound/soc/intel/boards/Kconfig
 +++ b/sound/soc/intel/boards/Kconfig
 @@ -138,6 +138,19 @@ config SND_SOC_INTEL_BYTCR_WM5102_MACH
@@ -321,25 +302,26 @@ index 033be4d3e..6bce05b28 100644
 +	select SND_SOC_RT5659
 +	help
 +	  This adds support for ASoC machine driver for Intel(R) Cherrytrail & Braswell
-+	  platforms with RT5659 audio codec.
++	  platforms with RT5659 audio codec, as found on the Xiaomi Mi Pad 2.
 +	  Say Y or m if you have such a device. This is a recommended option.
 +	  If unsure select "N".
 +
  config SND_SOC_INTEL_CHT_BSW_RT5672_MACH
  	tristate "Cherrytrail & Braswell with RT5672 codec"
  	depends on I2C && ACPI
+
 diff --git a/sound/soc/intel/boards/Makefile b/sound/soc/intel/boards/Makefile
-index a570b5b40..42f0963dc 100644
+index a570b5b40..01224b7ef 100644
 --- a/sound/soc/intel/boards/Makefile
 +++ b/sound/soc/intel/boards/Makefile
-@@ -11,6 +11,7 @@ snd-soc-sst-glk-rt5682_max98357a-objs := glk_rt5682_max98357a.o
+@@ -8,6 +8,7 @@ snd-soc-sst-bxt-rt298-objs := bxt_rt298.o
+ snd-soc-sst-sof-pcm512x-objs := sof_pcm512x.o
+ snd-soc-sst-sof-wm8804-objs := sof_wm8804.o
+ snd-soc-sst-glk-rt5682_max98357a-objs := glk_rt5682_max98357a.o
++snd-soc-sst-cht-bsw-rt5659-y := cht_bsw_rt5659.o
  snd-soc-sst-bytcr-rt5640-objs := bytcr_rt5640.o
  snd-soc-sst-bytcr-rt5651-objs := bytcr_rt5651.o
  snd-soc-sst-bytcr-wm5102-objs := bytcr_wm5102.o
-+snd-soc-sst-cht-bsw-rt5659-objs := cht_bsw_rt5659.o
- snd-soc-sst-cht-bsw-rt5672-objs := cht_bsw_rt5672.o
- snd-soc-sst-cht-bsw-rt5645-objs := cht_bsw_rt5645.o
- snd-soc-sst-cht-bsw-max98090_ti-objs := cht_bsw_max98090_ti.o
 @@ -60,6 +61,7 @@ obj-$(CONFIG_SND_SOC_INTEL_BDW_RT5677_MACH) += snd-soc-sst-bdw-rt5677-mach.o
  obj-$(CONFIG_SND_SOC_INTEL_BYTCR_RT5640_MACH) += snd-soc-sst-bytcr-rt5640.o
  obj-$(CONFIG_SND_SOC_INTEL_BYTCR_RT5651_MACH) += snd-soc-sst-bytcr-rt5651.o
@@ -348,12 +330,13 @@ index a570b5b40..42f0963dc 100644
  obj-$(CONFIG_SND_SOC_INTEL_CHT_BSW_RT5672_MACH) += snd-soc-sst-cht-bsw-rt5672.o
  obj-$(CONFIG_SND_SOC_INTEL_CHT_BSW_RT5645_MACH) += snd-soc-sst-cht-bsw-rt5645.o
  obj-$(CONFIG_SND_SOC_INTEL_CHT_BSW_MAX98090_TI_MACH) += snd-soc-sst-cht-bsw-max98090_ti.o
+
 diff --git a/sound/soc/intel/boards/cht_bsw_rt5659.c b/sound/soc/intel/boards/cht_bsw_rt5659.c
 new file mode 100644
-index 000000000..615466033
+index 000000000..0237dab37
 --- /dev/null
 +++ b/sound/soc/intel/boards/cht_bsw_rt5659.c
-@@ -0,0 +1,776 @@
+@@ -0,0 +1,885 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + *  cht_bsw_rt5659.c - ASoc Machine driver for Intel Cherryview-based platforms
@@ -389,6 +372,7 @@ index 000000000..615466033
 +
 +struct cht_mc_private {
 +	struct snd_soc_jack headset;
++	struct notifier_block jack_nb;
 +	char codec_name[SND_ACPI_I2C_ID_LEN];
 +	struct clk *mclk;
 +	bool use_ssp0;
@@ -409,8 +393,7 @@ index 000000000..615466033
 +static int platform_clock_control(struct snd_soc_dapm_widget *w,
 +		struct snd_kcontrol *k, int  event)
 +{
-+	struct snd_soc_dapm_context *dapm = w->dapm;
-+	struct snd_soc_card *card = dapm->card;
++	struct snd_soc_card *card = w->dapm->card;
 +	struct snd_soc_dai *codec_dai;
 +	struct cht_mc_private *ctx = snd_soc_card_get_drvdata(card);
 +	int ret;
@@ -465,6 +448,63 @@ index 000000000..615466033
 +	return 0;
 +}
 +
++/*
++ * 耳机插入时让扬声器静音。
++ *
++ * 板上扬声器由两颗 TFA9890 驱动，音频由 rt5659 的 AIF2 引脚送出。功放自身的
++ * 通断由它的 DAPM 链（OUT -> AMPE -> POWER）管理；直接写 SYS_CTRL 会和 DAPM
++ * 抢同一批寄存器位，播放时被覆盖，所以这里改成切断 OUT widget 的连通性，
++ * 让 DAPM 自己把功放断电 / 恢复。
++ *
++ * widget 名带 codec_conf 里配置的 name_prefix（Left/Right）。
++ */
++static int cht_spk_power_apply(struct snd_soc_card *card, bool on)
++{
++	struct snd_soc_component *component;
++
++	for_each_card_components(card, component) {
++		int ret;
++
++		if (strncmp(component->name, "i2c-tfa9890", 11))
++			continue;
++
++		/*
++		 * 传【不带前缀】的 widget 名：dapm_find_widget() 会用
++		 * component->name_prefix 自己拼成 "Left OUT" 再去查表。
++		 * 这里若自己加前缀，会被加成 "Left Left OUT" 而查不到。
++		 */
++		if (on)
++			ret = snd_soc_dapm_enable_pin(&component->dapm, "OUT");
++		else
++			ret = snd_soc_dapm_disable_pin(&component->dapm, "OUT");
++		if (ret < 0) {
++			dev_err(card->dev, "failed to %s OUT on %s: %d\n",
++				on ? "enable" : "disable", component->name, ret);
++			continue;
++		}
++
++		snd_soc_dapm_sync(&component->dapm);
++
++		dev_info(card->dev, "TFA9890 %s: output %s\n", component->name,
++			 on ? "enabled" : "disabled");
++	}
++
++	return 0;
++}
++
++static int cht_jack_notify(struct notifier_block *nb, unsigned long status,
++			   void *data)
++{
++	struct snd_soc_jack *jack = data;
++	struct snd_soc_card *card = jack->card;
++	bool hp = status & SND_JACK_HEADPHONE;
++
++	/* 插着耳机就把扬声器功放断电，拔出再恢复 */
++	cht_spk_power_apply(card, !hp);
++
++	return NOTIFY_OK;
++}
++
 +static const struct snd_soc_dapm_widget cht_dapm_widgets[] = {
 +	SND_SOC_DAPM_HP("Headphone", NULL),
 +	SND_SOC_DAPM_MIC("Headset Mic", NULL),
@@ -488,24 +528,46 @@ index 000000000..615466033
 +	{"Headphone", NULL, "HPOR"},
 +	{"Ext Spk", NULL, "SPOL"},
 +	{"Ext Spk", NULL, "SPOR"},
++	/*
++	 * 功放的 DAI widget 接到 rt5659 的 AIF2 上：扬声器的数据由 rt5659 内部
++	 * 回环（aif1 -> aif2）后经硬件 I2S 引脚送出。功放自身不再承载 PCM
++	 * （见 Dummy-TFA989x Speaker L/R 的 no_pcm），因此它的电源不再被
++	 * 播放流绑死，插孔事件可以自由控制。
++	 * 名字里的 Left/Right 来自 codec_conf 的 name_prefix。
++	 */
++	{"Left HiFi Playback", NULL, "AIF2 Playback"},
++	{"Right HiFi Playback", NULL, "AIF2 Playback"},
++	/*
++	 * Platform Clock 是 DAPM supply，负责开关编解码器 MCLK（pmc_plt_clk_3）。
++	 * 它必须挂在真实存在的 widget 上：原来挂到 "AIF1 Playback"/"AIF1 Capture"，
++	 * 但 SST 平台的 DAI widget 名取自 stream_name（FE 是 "Headset Playback"），
++	 * 这两个 widget 并不存在，snd_soc_dapm_add_route() 返回 -ENODEV，
++	 * 该 supply 就永远不会上电。这里与 rt5672 / bytcr_rt5640 保持一致，挂在引脚上。
++	 */
++	{"Headphone", NULL, "Platform Clock"},
++	{"Headset Mic", NULL, "Platform Clock"},
++	{"Int Mic", NULL, "Platform Clock"},
++	{"Ext Spk", NULL, "Platform Clock"},
 +};
 +
 +static const struct snd_soc_dapm_route cht_audio_ssp0_map[] = {
-+	{"AIF1 Playback", NULL, "ssp0 Tx"},
 +	{"ssp0 Tx", NULL, "modem_out"},
 +	{"modem_in", NULL, "ssp0 Rx"},
-+	{"ssp0 Rx", NULL, "AIF1 Capture"},
 +};
 +
++/*
++ * FE↔BE 的桥接路由。老内核里 FE DAI 的 stream_name 叫 AIF1 Playback/Capture，
++ * 主线 SST 平台改名后这两个 widget 已不存在，对应路由加不上（-ENODEV）。
++ * FE→BE 的实际通路由平台 DAPM 图提供：
++ *   Headset Playback → media1_in → media0_out → pcm0_in → codec_out0 → ssp2 Tx
++ *   ssp2 Rx → codec_in0 → pcm1_out → Headset Capture
++ * 这里只补板级侧的 codec_inx ↔ ssp2 连线。
++ */
 +static const struct snd_soc_dapm_route cht_audio_ssp2_map[] = {
-+	{"AIF1 Playback", NULL, "ssp2 Tx"},
 +	{"ssp2 Tx", NULL, "codec_out0"},
 +	{"ssp2 Tx", NULL, "codec_out1"},
 +	{"codec_in0", NULL, "ssp2 Rx"},
 +	{"codec_in1", NULL, "ssp2 Rx"},
-+	{"ssp2 Rx", NULL, "AIF1 Capture"},
-+	{"AIF1 Playback", NULL, "Platform Clock"},
-+	{"AIF1 Capture", NULL, "Platform Clock"},
 +};
 +
 +static const struct snd_kcontrol_new cht_mc_controls[] = {
@@ -541,7 +603,7 @@ index 000000000..615466033
 +
 +	/* TDM slave Mode */
 +	fmt =   SND_SOC_DAIFMT_DSP_B | SND_SOC_DAIFMT_IB_NF
-+		| SND_SOC_DAIFMT_CBS_CFS;
++		| SND_SOC_DAIFMT_CBC_CFC;
 +
 +	/* Set codec DAI configuration */
 +	ret = snd_soc_dai_set_fmt(codec_dai, fmt);
@@ -577,121 +639,10 @@ index 000000000..615466033
 +	{},
 +};
 +/*
-+static int cht_codec_init(struct snd_soc_pcm_runtime *runtime)
-+{
-+	int ret;
-+	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(runtime, 0);
-+	struct snd_soc_component *component = codec_dai->component;
-+	struct cht_mc_private *ctx = snd_soc_card_get_drvdata(runtime->card);
-+
-+	if (devm_acpi_dev_add_driver_gpios(component->dev, cht_rt5659_gpios))
-+		dev_warn(runtime->dev, "Unable to add GPIO mapping table\n");
-+
-+	// Select codec ASRC clock source to track I2S1 clock, because codec
-+	// is in slave mode and 100fs I2S format (BCLK = 100 * LRCLK) cannot
-+	// be supported by RT5672. Otherwise, ASRC will be disabled and cause
-+	// noise.
-+
-+	rt5659_sel_asrc_clk_src(component,
-+				RT5659_DA_STEREO_FILTER
-+				| RT5659_DA_MONO_L_FILTER
-+				| RT5659_DA_MONO_R_FILTER
-+				| RT5659_AD_STEREO_FILTER
-+				| RT5659_AD_MONO_L_FILTER
-+				| RT5659_AD_MONO_R_FILTER,
-+				RT5659_CLK_SEL_I2S1_ASRC);
-+
-+	if (ctx->use_ssp0) {
-+		ret = snd_soc_dapm_add_routes(&runtime->card->dapm,
-+						  cht_audio_ssp0_map,
-+						  ARRAY_SIZE(cht_audio_ssp0_map));
-+	} else {
-+		ret = snd_soc_dapm_add_routes(&runtime->card->dapm,
-+						  cht_audio_ssp2_map,
-+						  ARRAY_SIZE(cht_audio_ssp2_map));
-+	}
-+	if (ret)
-+		return ret;
-+
-+	ret = snd_soc_card_jack_new_pins(runtime->card, "Headset",
-+					 SND_JACK_HEADSET | SND_JACK_BTN_0 |
-+					 SND_JACK_BTN_1 | SND_JACK_BTN_2,
-+					 &ctx->headset,
-+					 cht_bsw_headset_pins,
-+					 ARRAY_SIZE(cht_bsw_headset_pins));
-+		if (ret)
-+				return ret;
-+
-+	snd_jack_set_key(ctx->headset.jack, SND_JACK_BTN_0, KEY_PLAYPAUSE);
-+	snd_jack_set_key(ctx->headset.jack, SND_JACK_BTN_1, KEY_VOLUMEUP);
-+	snd_jack_set_key(ctx->headset.jack, SND_JACK_BTN_2, KEY_VOLUMEDOWN);
-+
-+	rt5659_set_jack_detect(component, &ctx->headset);
-+	if (ctx->mclk) {
-+		// The firmware might enable the clock at
-+		// boot (this information may or may not
-+		// be reflected in the enable clock register).
-+		// To change the rate we must disable the clock
-+		// first to cover these cases. Due to common
-+		// clock framework restrictions that do not allow
-+		// to disable a clock that has not been enabled,
-+		// we need to enable the clock first.
-+		ret = clk_prepare_enable(ctx->mclk);
-+		if (!ret)
-+			clk_disable_unprepare(ctx->mclk);
-+
-+		ret = clk_set_rate(ctx->mclk, CHT_PLAT_CLK_3_HZ);
-+
-+		if (ret) {
-+			dev_err(runtime->dev, "unable to set MCLK rate\n");
-+			return ret;
-+		}
-+	}
-+	return 0;
-+}
-+*/
-+static int cht_audio_init(struct snd_soc_pcm_runtime *runtime)
-+{
-+	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(runtime, 0);
-+	struct snd_soc_component *component = codec_dai->component;
-+	struct cht_mc_private *ctx = snd_soc_card_get_drvdata(runtime->card);
-+	int ret;
-+	struct snd_soc_card *card = runtime->card;
-+
-+	if (ctx->use_ssp0) {
-+		ret = snd_soc_dapm_add_routes(&runtime->card->dapm,
-+						  cht_audio_ssp0_map,
-+						  ARRAY_SIZE(cht_audio_ssp0_map));
-+		pr_debug("%s add cht_audio_ssp0_map got ret %d \n", __func__,ret);
-+	} else {
-+		ret = snd_soc_dapm_add_routes(&runtime->card->dapm,
-+						  cht_audio_ssp2_map,
-+						  ARRAY_SIZE(cht_audio_ssp2_map));
-+		pr_debug("%s add cht_audio_ssp2_map got ret %d \n", __func__,ret);
-+	}
-+
-+	int codec_gpio;
-+	int pol = 0, val = 0;
-+	struct gpio_desc *desc;
-+
-+	pr_debug("Enter:%s", __func__);
-+
-+	/* Set codec bias level */
-+	card->dapm.bias_level = SND_SOC_BIAS_OFF;
-+	card->dapm.idle_bias_off = true;
-+
-+	desc = devm_gpiod_get_index(component->dev, NULL, 0, 0);
-+	if (!IS_ERR(desc)) {
-+		codec_gpio = desc_to_gpio(desc);
-+		devm_gpiod_put(component->dev, desc);
-+		pr_debug("%s: GPIOs - JD/BP-int: %d (pol = %d, val = %d)\n",
-+				__func__, codec_gpio, pol, val);
-+
-+	} else {
-+		codec_gpio = -1;
-+		pr_err("%s: GPIOs - JD/BP-int: Not present!\n", __func__);
-+	}
-+
++ * 以下为官方（Android）版基于 snd_soc_jack_gpio + delayed work 的插孔检测参考实现，
++ * 依赖 wake_lock、ctx->jack/intr_debounce 等 Android 专有设施，主线无法编译，
++ * 仅作参考保留。主线走 IRQ + snd_soc_card_jack_new_pins 的实现，见下方 cht_codec_init。
++ */
 +/*
 +	hs_gpio.gpio = codec_gpio;
 +
@@ -730,13 +681,104 @@ index 000000000..615466033
 +		return ret;
 +	}
 +*/
-+	/* Keep the voice call paths active during
-+	 * suspend. Mark the end points ignore_suspend
++
++/*
++ * 对应官方 cht_codec_init 的职责：注册 DAPM 路由、建立插孔检测、初始化 MCLK。
++ * 与 rt5672 版的差别是去掉了 ASRC 时钟源选择——rt5659 没有 sel_asrc_clk_src()，
++ * 官方 rt5659 板级驱动同样不做这一步。
++ */
++static int cht_codec_init(struct snd_soc_pcm_runtime *runtime)
++{
++	int ret;
++	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(runtime, 0);
++	struct snd_soc_component *component = codec_dai->component;
++	struct snd_soc_card *card = runtime->card;
++	struct cht_mc_private *ctx = snd_soc_card_get_drvdata(card);
++
++	if (devm_acpi_dev_add_driver_gpios(component->dev, cht_rt5659_gpios))
++		dev_warn(runtime->dev, "Unable to add GPIO mapping table\n");
++
++	/*
++	 * FE↔BE 的 DAPM 桥接按 SSP 选择在此加入。返回值必须检查：
++	 * 加失败会静默断开通路，最终只表现为 "no backend DAIs enabled"。
 +	 */
-+	/*TODO: CHECK this */
++	if (ctx->use_ssp0)
++		ret = snd_soc_dapm_add_routes(&card->dapm, cht_audio_ssp0_map,
++					      ARRAY_SIZE(cht_audio_ssp0_map));
++	else
++		ret = snd_soc_dapm_add_routes(&card->dapm, cht_audio_ssp2_map,
++					      ARRAY_SIZE(cht_audio_ssp2_map));
++	if (ret) {
++		dev_err(runtime->dev, "failed to add SSP DAPM routes: %d\n", ret);
++		return ret;
++	}
++
++	/* 6.12：card->dapm 是嵌入式结构体，且仍保留 idle_bias_off 位 */
++	card->dapm.idle_bias_off = true;
++	snd_soc_dapm_init_bias_level(&card->dapm, SND_SOC_BIAS_OFF);
++
++	ret = snd_soc_card_jack_new_pins(card, "Headset",
++					 SND_JACK_HEADSET | SND_JACK_BTN_0 |
++					 SND_JACK_BTN_1 | SND_JACK_BTN_2,
++					 &ctx->headset,
++					 cht_bsw_headset_pins,
++					 ARRAY_SIZE(cht_bsw_headset_pins));
++	if (ret)
++		return ret;
++
++	/*
++	 * 挂上插孔通知：耳机插入时给扬声器功放掉电（见 cht_jack_notify）。
++	 * 放在 set_jack_detect 之前，避免漏掉首次状态上报。
++	 */
++	ctx->jack_nb.notifier_call = cht_jack_notify;
++	snd_soc_jack_notifier_register(&ctx->headset, &ctx->jack_nb);
++
++	snd_jack_set_key(ctx->headset.jack, SND_JACK_BTN_0, KEY_PLAYPAUSE);
++	snd_jack_set_key(ctx->headset.jack, SND_JACK_BTN_1, KEY_VOLUMEUP);
++	snd_jack_set_key(ctx->headset.jack, SND_JACK_BTN_2, KEY_VOLUMEDOWN);
++
++	/* codec 侧注册 jack，插孔状态变化由 rt5659 的中断驱动 */
++	rt5659_set_jack_detect(component, &ctx->headset);
++
++	if (ctx->mclk) {
++		/*
++		 * The firmware might enable the clock at boot (this information
++		 * may or may not be reflected in the enable clock register).
++		 * To change the rate we must disable the clock first to cover
++		 * these cases. Due to common clock framework restrictions that do
++		 * not allow to disable a clock that has not been enabled, we
++		 * need to enable the clock first.
++		 */
++		ret = clk_prepare_enable(ctx->mclk);
++		if (!ret)
++			clk_disable_unprepare(ctx->mclk);
++
++		ret = clk_set_rate(ctx->mclk, CHT_PLAT_CLK_3_HZ);
++		if (ret) {
++			dev_err(runtime->dev, "unable to set MCLK rate\n");
++			return ret;
++		}
++	}
++
++	/*
++	 * 预置 PLL 与 sysclk。c2c 链路（Codec AIF2 Port）的 hw_params 由 DAPM
++	 * 在 PRE_PMU 里直接对 DAI 调用，可能早于 SSP2-Codec 的 hw_params；那时
++	 * sysclk 还是 0，rt5659_hw_params() 会以 "Unsupported clock setting" 失败。
++	 */
++	if (codec_dai) {
++		int clk_ret = snd_soc_dai_set_pll(codec_dai, 0, RT5659_PLL1_S_MCLK,
++						  CHT_PLAT_CLK_3_HZ, 48000 * 512);
++
++		if (clk_ret)
++			dev_warn(runtime->dev, "cannot preset codec pll: %d\n", clk_ret);
++		else
++			snd_soc_dai_set_sysclk(codec_dai, RT5659_SCLK_S_PLL1,
++					      48000 * 512, SND_SOC_CLOCK_IN);
++	}
++
++	/* Keep the voice call paths active during suspend. */
 +	snd_soc_dapm_ignore_suspend(&component->dapm, "HPOL");
 +	snd_soc_dapm_ignore_suspend(&component->dapm, "HPOR");
-+
 +	snd_soc_dapm_ignore_suspend(&component->dapm, "SPOL");
 +	snd_soc_dapm_ignore_suspend(&component->dapm, "SPOR");
 +
@@ -746,7 +788,7 @@ index 000000000..615466033
 +	snd_soc_dapm_enable_pin(&card->dapm, "Int Mic");
 +
 +	snd_soc_dapm_sync(&card->dapm);
-+	return ret;
++	return 0;
 +}
 +
 +static int cht_codec_fixup(struct snd_soc_pcm_runtime *rtd,
@@ -846,17 +888,37 @@ index 000000000..615466033
 +SND_SOC_DAILINK_DEF(deepbuffer,
 +	DAILINK_COMP_ARRAY(COMP_CPU("deepbuffer-cpu-dai")));
 +
++/*
++ * 这颗 codec 的 i2c client 名。板子的 ACPI 只暴露 10EC5659:01，
++ * 直接写死即可 —— 原来的运行时 fixup（acpi_dev_get_first_match_dev）
++ * 只会改一个 dailink，在多处引用同一 codec 时反而把名字改错，
++ * 导致找不到 codec DAI 而 EPROBE_DEFER。
++ */
++#define RT5659_I2C_NAME	"i2c-10EC5659:01"
 +SND_SOC_DAILINK_DEF(ssp2_port,
 +	DAILINK_COMP_ARRAY(COMP_CPU("ssp2-port")));
 +SND_SOC_DAILINK_DEF(ssp2_codec,
-+	DAILINK_COMP_ARRAY(COMP_CODEC("i2c-10EC5659:00",
++	DAILINK_COMP_ARRAY(COMP_CODEC(RT5659_I2C_NAME,
 +					  "rt5659-aif1")));
 +
 +SND_SOC_DAILINK_DEF(platform,
 +	DAILINK_COMP_ARRAY(COMP_PLATFORM("sst-mfld-platform")));
 +
-+SND_SOC_DAILINK_DEF(rt5659_aif2_cpu,
-+	DAILINK_COMP_ARRAY(COMP_CPU("rt5659-aif2")));
++/*
++ * 三段式布线（与厂商 / Android 侧一致）：
++ *
++ *   rt5659 aif1 --c2c--> rt5659 aif2   数据在 codec 内部回环，
++ *                                      最终由硬件 I2S 引脚送到功放
++ *   Dummy-BE(no_pcm) 挂功放          让功放留在 DAPM 图里，但不绑定任何 PCM
++ *
++ * 这样做的好处是功放的电源不再被“有播放流”绑死：
++ * 耳机模式下可以让 rt5659 不再往 AIF2 送数据，功放自然静音。
++ */
++SND_SOC_DAILINK_DEF(rt5659_aif1_cpu,
++	DAILINK_COMP_ARRAY(COMP_CPU("rt5659-aif1")));
++SND_SOC_DAILINK_DEF(rt5659_aif2_codec,
++	DAILINK_COMP_ARRAY(COMP_CODEC(RT5659_I2C_NAME,
++					  "rt5659-aif2")));
 +
 +SND_SOC_DAILINK_DEF(spk_l_codec,
 +	DAILINK_COMP_ARRAY(COMP_CODEC("i2c-tfa9890:00",
@@ -885,6 +947,8 @@ index 000000000..615466033
 +		.stream_name = "Audio",
 +		.nonatomic = true,
 +		.dynamic = 1,
++		.dpcm_playback = 1,
++		.dpcm_capture = 1,
 +		.ops = &cht_aif1_ops,
 +		SND_SOC_DAILINK_REG(media, dummy, platform),
 +	},
@@ -893,7 +957,7 @@ index 000000000..615466033
 +		.stream_name = "Deep-Buffer Audio",
 +		.nonatomic = true,
 +		.dynamic = 1,
-+		.playback_only = 1,
++		.dpcm_playback = 1,
 +		.ops = &cht_aif1_ops,
 +		SND_SOC_DAILINK_REG(deepbuffer, dummy, platform),
 +	},
@@ -904,30 +968,55 @@ index 000000000..615466033
 +		.name = "SSP2-Codec",
 +		.id = 0,
 +		.no_pcm = 1,
-+		//.init = cht_codec_init,
-+		.init = cht_audio_init,
++		.init = cht_codec_init,
 +		.be_hw_params_fixup = cht_codec_fixup,
++		.dpcm_playback = 1,
++		.dpcm_capture = 1,
 +		.ops = &cht_be_ssp2_ops,
 +		SND_SOC_DAILINK_REG(ssp2_port, ssp2_codec, platform),
 +		.ignore_suspend = 1,
 +		.ignore_pmdown_time = 1,
 +	},
 +	{
-+		.name = "rt5659_AIF2-TFA989x_Speaker_L",
-+		.stream_name = "aif2-spk_l",
-+		SND_SOC_DAILINK_REG(rt5659_aif2_cpu, spk_l_codec),
++		/*
++		 * rt5659 内部 aif1 -> aif2 回环：数据由 codec 自己从 aif1 收到、
++		 * 从 aif2 输出，再经硬件 I2S 引脚送到 TFA9890。
++		 *
++		 * 与厂商驱动一致：不用 c2c_params，这样它是普通 PCM 链路，
++		 * dailink 的 .ops 才会被调用（c2c 的 hw_params 走 DAPM，绕过 ops）。
++		 * 时钟方向 CBM_CFM：由 codec 自己产生 BCLK/LRCK。
++		 */
++		.name = "Codec AIF2 Port",
++		.stream_name = "rt5659 AIF2 Playback",
++		SND_SOC_DAILINK_REG(rt5659_aif1_cpu, rt5659_aif2_codec),
 +		.dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
-+			SND_SOC_DAIFMT_CBS_CFS,
++			SND_SOC_DAIFMT_CBP_CFP,
++		/*
++		 * c2c_params 是必需的：snd_soc_dai_link_event_pre_pmu() 会
++		 * 用它构造 hw_params，缺了直接返回 -EINVAL，AIF2 回环不会启动，
++		 * 功放就收不到数据（播放无报错但无声）。
++		 */
 +		.c2c_params = nxp_tfa989x_params,
 +		.num_c2c_params = 1,
-+	},{
-+		.name = "rt5659_AIF2-TFA989x_Speaker_R",
-+		.stream_name = "aif2-spk_r",
-+		SND_SOC_DAILINK_REG(rt5659_aif2_cpu, spk_r_codec),
-+		.dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
-+			SND_SOC_DAIFMT_CBS_CFS,
-+		.c2c_params = nxp_tfa989x_params,
-+		.num_c2c_params = 1,
++	}, {
++		/*
++		 * 功放本身不承载 PCM（no_pcm）：只为让它留在 DAPM 图里，
++		 * 同时避免 POWER widget 被播放流长时间点亮——耳机模式下
++		 * 功放电源因此可以由插孔事件自由控制。
++		 */
++		.name = "Dummy-TFA989x Speaker L",
++		.no_pcm = 1,
++		.dpcm_playback = 1,
++		.dpcm_capture = 1,
++		.ignore_suspend = 1,
++		SND_SOC_DAILINK_REG(dummy, spk_l_codec),
++	}, {
++		.name = "Dummy-TFA989x Speaker R",
++		.no_pcm = 1,
++		.dpcm_playback = 1,
++		.dpcm_capture = 1,
++		.ignore_suspend = 1,
++		SND_SOC_DAILINK_REG(dummy, spk_r_codec),
 +	},
 +};
 +
@@ -973,6 +1062,15 @@ index 000000000..615466033
 +#define CARD_NAME "cht-bsw-rt5659"
 +#define DRIVER_NAME NULL /* card name will be used for driver name */
 +
++/*
++ * 两颗 TFA9890 共用同一份 codec component driver，实例间的 widget/kcontrol
++ * 重名靠这里的 name_prefix 消解。左右归属只在此处声明，codec 驱动不参与。
++ */
++static struct snd_soc_codec_conf cht_tfa_codec_conf[] = {
++	{ .dlc.name = "i2c-tfa9890:00", .name_prefix = "Left" },
++	{ .dlc.name = "i2c-tfa9890:01", .name_prefix = "Right" },
++};
++
 +/* SoC card */
 +static struct snd_soc_card snd_soc_card_cht = {
 +	.owner = THIS_MODULE,
@@ -984,11 +1082,12 @@ index 000000000..615466033
 +	.num_dapm_routes = ARRAY_SIZE(cht_audio_map),
 +	.controls = cht_mc_controls,
 +	.num_controls = ARRAY_SIZE(cht_mc_controls),
++	.codec_conf = cht_tfa_codec_conf,
++	.num_configs = ARRAY_SIZE(cht_tfa_codec_conf),
 +	.suspend_pre = cht_suspend_pre,
 +	.resume_post = cht_resume_post,
 +};
 +
-+#define RT5659_I2C_DEFAULT	"i2c-10EC5659:00"
 +
 +static int snd_cht_mc_probe(struct platform_device *pdev)
 +{
@@ -997,7 +1096,6 @@ index 000000000..615466033
 +	struct snd_soc_acpi_mach *mach = pdev->dev.platform_data;
 +	struct sst_platform_info *pdata;
 +	const char *platform_name;
-+	struct acpi_device *adev;
 +	bool sof_parent;
 +	int dai_index = 0;
 +	int i;
@@ -1014,12 +1112,12 @@ index 000000000..615466033
 +	if (!drv)
 +		return -ENOMEM;
 +
-+	strcpy(drv->codec_name, RT5659_I2C_DEFAULT);
++	strcpy(drv->codec_name, RT5659_I2C_NAME);
 +
 +	/* find index of codec dai */
 +	for (i = 0; i < ARRAY_SIZE(cht_dailink); i++) {
 +		if (cht_dailink[i].codecs->name &&
-+			!strcmp(cht_dailink[i].codecs->name, RT5659_I2C_DEFAULT)) {
++			!strcmp(cht_dailink[i].codecs->name, RT5659_I2C_NAME)) {
 +			dai_index = i;
 +			break;
 +		}
@@ -1030,17 +1128,11 @@ index 000000000..615466033
 +	else{
 +		pr_info("cht-bsw-rt5659 index %d dai codec name %s\n", dai_index, cht_dailink[dai_index].codecs->name);
 +
-+		/* fixup codec name based on HID */
-+		adev = acpi_dev_get_first_match_dev(mach->id, NULL, -1);
-+		if (adev) {
-+			snprintf(drv->codec_name, sizeof(drv->codec_name),
-+				 "i2c-%s", acpi_dev_name(adev));
-+			cht_dailink[dai_index].codecs->name = drv->codec_name;
-+		}
-+		acpi_dev_put(adev);
-+
-+		pr_info("cht-bsw-rt5659 acpi_device name %s\n", acpi_dev_name(adev));
-+		pr_info("cht-bsw-rt5659 fixuped index %d dai codec name %s\n", dai_index, cht_dailink[dai_index].codecs->name);
++		/*
++		 * codec 名已在 RT5659_I2C_NAME 里写死，不再做运行时 ACPI 探测：
++		 * 那套逻辑只改第一个匹配的 dailink，而我们有两处引用同一 codec
++		 * （SSP2-Codec 与 Codec AIF2 Port），会被改成不存在的实例名。
++		 */
 +
 +		/* Use SSP0 on Bay Trail CR devices */
 +		if (soc_intel_is_byt() && mach->mach_params.acpi_ipc_irq_index == 0) {
@@ -1131,17 +1223,16 @@ index 000000000..615466033
 +MODULE_LICENSE("GPL v2");
 +MODULE_ALIAS("platform:cht-bsw-rt5659");
 diff --git a/sound/soc/intel/common/soc-acpi-intel-cht-match.c b/sound/soc/intel/common/soc-acpi-intel-cht-match.c
-index 0b930c91b..b7fdd34e5 100644
+index 0b930c91b..6afcb6eea 100644
 --- a/sound/soc/intel/common/soc-acpi-intel-cht-match.c
 +++ b/sound/soc/intel/common/soc-acpi-intel-cht-match.c
-@@ -138,6 +138,12 @@ static const struct snd_soc_acpi_codecs da7213_comp_ids = {
+@@ -138,6 +138,11 @@ static const struct snd_soc_acpi_codecs da7213_comp_ids = {
  
  /* Cherryview-based platforms: CherryTrail and Braswell */
  struct snd_soc_acpi_mach  snd_soc_acpi_intel_cherrytrail_machines[] = {
 +	{
 +		.id = "10EC5659",
 +		.drv_name = "cht-bsw-rt5659",
-+		.board = "cht-bsw",
 +		.fw_filename = "intel/fw_sst_22a8.bin",
 +	},
  	{

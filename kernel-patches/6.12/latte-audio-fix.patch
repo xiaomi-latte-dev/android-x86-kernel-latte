@@ -1,5 +1,5 @@
 diff --git a/drivers/platform/x86/x86-android-tablets/other.c b/drivers/platform/x86/x86-android-tablets/other.c
-index 7db8aa58b..d4f28466c 100644
+index 7db8aa58b..5cf1435f2 100644
 --- a/drivers/platform/x86/x86-android-tablets/other.c
 +++ b/drivers/platform/x86/x86-android-tablets/other.c
 @@ -10,6 +10,7 @@
@@ -98,7 +98,26 @@ index 7db8aa58b..d4f28466c 100644
  	software_node_unregister_node_group(ktd2026_node_group);
  }
  
-@@ -748,7 +815,13 @@ static const struct x86_i2c_client_info xiaomi_mipad2_i2c_clients[] __initconst
+@@ -745,10 +812,32 @@ static const struct x86_i2c_client_info xiaomi_mipad2_i2c_clients[] __initconst
+ 			.swnode = &ktd2026_node,
+ 		},
+ 		.adapter_path = "\\_SB_.PCI0.I2C3",
++	}, {
++		/* TFA9890A audio amplifier */
++		.board_info = {
++			.type = "tfa9890",
++			.addr = 0x34,
++			.dev_name = "tfa9890:00",
++		},
++		.adapter_path = "\\_SB_.PCI0.I2C2",
++	}, {
++		/* TFA9890A audio amplifier */
++		.board_info = {
++			.type = "tfa9890",
++			.addr = 0x37,
++			.dev_name = "tfa9890:01",
++		},
++		.adapter_path = "\\_SB_.PCI0.I2C2",
  	},
  };
  

@@ -52,7 +52,7 @@ index 26a4ef670..838585a8d 100644
  	struct gpio_desc *gpiod;
  	int ret;
 diff --git a/drivers/platform/x86/x86-android-tablets/other.c b/drivers/platform/x86/x86-android-tablets/other.c
-index 23e4426cb..b7f928ee9 100644
+index fe5f68fa7..333e8e65f 100644
 --- a/drivers/platform/x86/x86-android-tablets/other.c
 +++ b/drivers/platform/x86/x86-android-tablets/other.c
 @@ -178,7 +178,7 @@ static const struct x86_i2c_client_info chuwi_hi8_i2c_clients[] __initconst = {

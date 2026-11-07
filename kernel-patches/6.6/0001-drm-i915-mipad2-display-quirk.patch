@@ -1,0 +1,113 @@
+diff --git a/drivers/gpu/drm/i915/display/intel_display_driver.c b/drivers/gpu/drm/i915/display/intel_display_driver.c
+index 26514f931..1451b98fa 100644
+--- a/drivers/gpu/drm/i915/display/intel_display_driver.c
++++ b/drivers/gpu/drm/i915/display/intel_display_driver.c
+@@ -209,6 +209,9 @@ int intel_display_driver_probe_noirq(struct drm_i915_private *i915)
+ 	if (ret)
+ 		goto cleanup_bios;
+ 
++	/* quirks must be registered before power domain init (INIT domain consults them) */
++	intel_init_quirks(i915);
++
+ 	/* FIXME: completely on the wrong abstraction layer */
+ 	ret = intel_power_domains_init(i915);
+ 	if (ret < 0)
+@@ -253,8 +256,6 @@ int intel_display_driver_probe_noirq(struct drm_i915_private *i915)
+ 	INIT_WORK(&i915->display.atomic_helper.free_work,
+ 		  intel_atomic_helper_free_state_worker);
+ 
+-	intel_init_quirks(i915);
+-
+ 	intel_fbc_init(i915);
+ 
+ 	return 0;
+diff --git a/drivers/gpu/drm/i915/display/intel_display_power.c b/drivers/gpu/drm/i915/display/intel_display_power.c
+index 8beeda343..b31369fc9 100644
+--- a/drivers/gpu/drm/i915/display/intel_display_power.c
++++ b/drivers/gpu/drm/i915/display/intel_display_power.c
+@@ -23,6 +23,7 @@
+ #include "intel_pcode.h"
+ #include "intel_pmdemand.h"
+ #include "intel_pps_regs.h"
++#include "intel_quirks.h"
+ #include "intel_snps_phy.h"
+ #include "skl_watermark.h"
+ #include "skl_watermark_regs.h"
+@@ -1017,6 +1018,7 @@ static u32 get_allowed_dc_mask(const struct drm_i915_private *dev_priv,
+ int intel_power_domains_init(struct drm_i915_private *dev_priv)
+ {
+ 	struct i915_power_domains *power_domains = &dev_priv->display.power.domains;
++	int ret;
+ 
+ 	dev_priv->params.disable_power_well =
+ 		sanitize_disable_power_well_option(dev_priv,
+@@ -1032,7 +1034,29 @@ int intel_power_domains_init(struct drm_i915_private *dev_priv)
+ 	INIT_DELAYED_WORK(&power_domains->async_put_work,
+ 			  intel_display_power_put_async_work);
+ 
+-	return intel_display_power_map_init(power_domains);
++	ret = intel_display_power_map_init(power_domains);
++	if (ret)
++		return ret;
++
++	/*
++	 * The Xiaomi Mi Pad 2 (CHV) has no DP/HDMI outputs at all (its VBT
++	 * only declares the internal MIPI panel), so force-enabling the
++	 * dpio-common-bc power well at init time hangs the P-Unit
++	 * (drm/i915 issue #4385). Instead of special-casing the device inside
++	 * the power domain get/put hot paths, drop POWER_DOMAIN_INIT from that
++	 * well's domain mask: the generic power well code then never
++	 * force-enables it, while the well stays usable for the DDI/AUX
++	 * domains it actually serves.
++	 */
++	if (intel_has_quirk(dev_priv, QUIRK_NO_VLV_DISP_PW_DPIO_CMN_BC_INIT)) {
++		struct i915_power_well *power_well;
++
++		power_well = lookup_power_well(dev_priv, VLV_DISP_PW_DPIO_CMN_BC);
++		if (power_well)
++			clear_bit(POWER_DOMAIN_INIT, power_well->domains.bits);
++	}
++
++	return 0;
+ }
+ 
+ /**
+diff --git a/drivers/gpu/drm/i915/display/intel_quirks.c b/drivers/gpu/drm/i915/display/intel_quirks.c
+index a280448df..2de9e9bb7 100644
+--- a/drivers/gpu/drm/i915/display/intel_quirks.c
++++ b/drivers/gpu/drm/i915/display/intel_quirks.c
+@@ -65,6 +65,12 @@ static void quirk_no_pps_backlight_power_hook(struct drm_i915_private *i915)
+ 	drm_info(&i915->drm, "Applying no pps backlight power quirk\n");
+ }
+ 
++static void quirk_no_vlv_disp_pw_dpio_cmn_bc_init(struct drm_i915_private *i915)
++{
++	intel_set_quirk(i915, QUIRK_NO_VLV_DISP_PW_DPIO_CMN_BC_INIT);
++	drm_info(&i915->drm, "Applying no dpio-common-bc powerwell init quirk\n");
++}
++
+ struct intel_quirk {
+ 	int device;
+ 	int subsystem_vendor;
+@@ -201,6 +207,9 @@ static struct intel_quirk intel_quirks[] = {
+ 	{ 0x3184, 0x1019, 0xa94d, quirk_increase_ddi_disabled_time },
+ 	/* HP Notebook - 14-r206nv */
+ 	{ 0x0f31, 0x103c, 0x220f, quirk_invert_brightness },
++
++	/* Xiaomi Mi Pad 2 */
++	{ 0x22b0, 0x1d72, 0x1502, quirk_no_vlv_disp_pw_dpio_cmn_bc_init },
+ };
+ 
+ void intel_init_quirks(struct drm_i915_private *i915)
+diff --git a/drivers/gpu/drm/i915/display/intel_quirks.h b/drivers/gpu/drm/i915/display/intel_quirks.h
+index 10a4d1631..11407581c 100644
+--- a/drivers/gpu/drm/i915/display/intel_quirks.h
++++ b/drivers/gpu/drm/i915/display/intel_quirks.h
+@@ -17,6 +17,7 @@ enum intel_quirk_id {
+ 	QUIRK_INVERT_BRIGHTNESS,
+ 	QUIRK_LVDS_SSC_DISABLE,
+ 	QUIRK_NO_PPS_BACKLIGHT_POWER_HOOK,
++	QUIRK_NO_VLV_DISP_PW_DPIO_CMN_BC_INIT,
+ };
+ 
+ void intel_init_quirks(struct drm_i915_private *i915);

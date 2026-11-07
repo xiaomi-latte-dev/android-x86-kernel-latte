@@ -1,7 +1,4 @@
-From 1f8d2e4b146cdaad0e62b17dea4ca86964b92386 Mon Sep 17 00:00:00 2001
-From: Qs315490 <qs315490@qq.com>
-Date: Mon, 23 Feb 2026 15:36:04 +0800
-Subject: [PATCH 4/9] media: atomisp: Drop atomisp-ov5693 sensor driver After
+Subject: media: atomisp: Drop atomisp-ov5693 sensor driver After
  recent improvements to atomisp driver, the atomisp driver now works fine with
  the standard ov5693 driver.
 

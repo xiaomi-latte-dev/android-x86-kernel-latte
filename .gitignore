@@ -3,3 +3,4 @@ out
 tmp
 MOK.*
 .config-diff/
+.patch-backup/

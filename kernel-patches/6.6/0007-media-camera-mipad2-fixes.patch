@@ -1,0 +1,179 @@
+Subject: media: ipu-bridge: Add Toshiba T4KA3 HID to list of
+ supported sensor The Xiaomi Mi Pad 2 tablet uses a Toshiba T4KA3 sensor,
+ using a Xiaomi specific Hardware-ID of "XMMC0003" add this to the sensor-list
+ of the ipu-bridge code.
+
+Signed-off-by: Hans de Goede <hdegoede@redhat.com>
+Signed-off-by: Sakari Ailus <sakari.ailus@linux.intel.com>
+Signed-off-by: Hans Verkuil <hverkuil@xs4all.nl>
+---
+ drivers/media/pci/intel/ipu-bridge.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/media/pci/intel/ipu-bridge.c b/drivers/media/pci/intel/ipu-bridge.c
+index bd58adb4c..f6911a460 100644
+--- a/drivers/media/pci/intel/ipu-bridge.c
++++ b/drivers/media/pci/intel/ipu-bridge.c
+@@ -62,6 +62,8 @@ static const struct ipu_sensor_config ipu_supported_sensors[] = {
+ 	IPU_SENSOR_CONFIG("OVTIDB10", 1, 560000000),
+ 	/* GalaxyCore GC0310 */
+ 	IPU_SENSOR_CONFIG("INT0310", 0),
++	/* Toshiba T4KA3 */
++	IPU_SENSOR_CONFIG("XMCC0003", 1, 321468000),
+ };
+ 
+ static const struct ipu_property_names prop_names = {
+-- 
+2.53.0
+
+diff --git a/drivers/staging/media/atomisp/pci/atomisp_cmd.c b/drivers/staging/media/atomisp/pci/atomisp_cmd.c
+index 0803b296e..69b028cc8 100644
+--- a/drivers/staging/media/atomisp/pci/atomisp_cmd.c
++++ b/drivers/staging/media/atomisp/pci/atomisp_cmd.c
+@@ -3808,6 +3808,15 @@ int atomisp_try_fmt(struct atomisp_device *isp, struct v4l2_pix_format *f,
+ 			return -EINVAL;
+ 	}
+ 
++	/*
++	 * The preview pipeline does not support width > 1920. Also limit height
++	 * to avoid sensor drivers still picking a too wide resolution.
++	 */
++	if (asd->run_mode->val == ATOMISP_RUN_MODE_PREVIEW) {
++		f->width = min(f->width, 1920U);
++		f->height = min(f->height, 1440U);
++	}
++
+ 	/*
+ 	 * atomisp_set_fmt() will set the sensor resolution to the requested
+ 	 * resolution + padding. Add padding here and remove it again after
+diff --git a/drivers/staging/media/atomisp/pci/atomisp_csi2_bridge.c b/drivers/staging/media/atomisp/pci/atomisp_csi2_bridge.c
+index 03940c115..6abda358a 100644
+--- a/drivers/staging/media/atomisp/pci/atomisp_csi2_bridge.c
++++ b/drivers/staging/media/atomisp/pci/atomisp_csi2_bridge.c
+@@ -106,6 +106,14 @@ static struct gmin_cfg_var lenovo_ideapad_miix_310_vars[] = {
+ 	{}
+ };
+ 
++static struct gmin_cfg_var xiaomi_mipad2_vars[] = {
++	/* _DSM contains the wrong CsiPort for the front facing OV5693 sensor */
++	{ "INT33BE:00", "CsiPort", "0" },
++	/* _DSM contains the wrong CsiLanes for the back facing T4KA3 sensor */
++	{ "XMCC0003:00", "CsiLanes", "4" },
++	{}
++};
++
+ static const struct dmi_system_id gmin_cfg_dmi_overrides[] = {
+ 	{
+ 		/* Lenovo Ideapad Miix 310 */
+@@ -115,6 +123,14 @@ static const struct dmi_system_id gmin_cfg_dmi_overrides[] = {
+ 		},
+ 		.driver_data = lenovo_ideapad_miix_310_vars,
+ 	},
++	{
++		/* Xiaomi Mipad2 */
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "Xiaomi Inc"),
++			DMI_MATCH(DMI_PRODUCT_NAME, "Mipad2"),
++		},
++		.driver_data = xiaomi_mipad2_vars,
++	},
+ 	{}
+ };
+ 
+@@ -521,7 +537,12 @@ static char *atomisp_csi2_get_vcm_type(struct acpi_device *adev)
+ }
+ 
+ static const struct acpi_device_id atomisp_sensor_configs[] = {
+-	ATOMISP_SENSOR_CONFIG("INT33BE", 2, true),	/* OV5693 */
++	/*
++	 * FIXME ov5693 modules have a VCM, but for unknown reasons
++	 * the sensor fails to start streaming when instantiating
++	 * an i2c-client for the VCM, so it is disabled for now.
++	 */
++	ATOMISP_SENSOR_CONFIG("INT33BE", 2, false),	/* OV5693 */
+ 	{}
+ };
+ 
+diff --git a/drivers/staging/media/atomisp/pci/atomisp_ioctl.c b/drivers/staging/media/atomisp/pci/atomisp_ioctl.c
+index d21741565..add3f61ca 100644
+--- a/drivers/staging/media/atomisp/pci/atomisp_ioctl.c
++++ b/drivers/staging/media/atomisp/pci/atomisp_ioctl.c
+@@ -708,6 +708,9 @@ static int atomisp_enum_framesizes_crop_inner(struct atomisp_device *isp,
+ 					      int *valid_sizes)
+ {
+ 	static const struct v4l2_frmsize_discrete frame_sizes[] = {
++		{ 1920, 1440 },
++		{ 1920, 1200 },
++		{ 1920, 1080 },
+ 		{ 1600, 1200 },
+ 		{ 1600, 1080 },
+ 		{ 1600,  900 },
+diff --git a/drivers/media/i2c/ov5693.c b/drivers/media/i2c/ov5693.c
+index 488ee6d9d..d6200a03a 100644
+--- a/drivers/media/i2c/ov5693.c
++++ b/drivers/media/i2c/ov5693.c
+@@ -141,7 +141,6 @@ struct ov5693_device {
+ 
+ 	struct gpio_desc *reset;
+ 	struct gpio_desc *powerdown;
+-	struct gpio_desc *privacy_led;
+ 	struct regulator_bulk_data supplies[OV5693_NUM_SUPPLIES];
+ 	struct clk *xvclk;
+ 
+@@ -154,7 +153,6 @@ struct ov5693_device {
+ 		unsigned int inc_y_odd;
+ 		unsigned int vts;
+ 	} mode;
+-	bool streaming;
+ 
+ 	struct v4l2_subdev sd;
+ 	struct media_pad pad;
+@@ -658,7 +656,6 @@ static int ov5693_sensor_init(struct ov5693_device *ov5693)
+ 
+ static void ov5693_sensor_powerdown(struct ov5693_device *ov5693)
+ {
+-	gpiod_set_value_cansleep(ov5693->privacy_led, 0);
+ 	gpiod_set_value_cansleep(ov5693->reset, 1);
+ 	gpiod_set_value_cansleep(ov5693->powerdown, 1);
+ 
+@@ -688,7 +685,6 @@ static int ov5693_sensor_powerup(struct ov5693_device *ov5693)
+ 
+ 	gpiod_set_value_cansleep(ov5693->powerdown, 0);
+ 	gpiod_set_value_cansleep(ov5693->reset, 0);
+-	gpiod_set_value_cansleep(ov5693->privacy_led, 1);
+ 
+ 	usleep_range(5000, 7500);
+ 
+@@ -996,8 +992,6 @@ static int ov5693_s_stream(struct v4l2_subdev *sd, int enable)
+ 	if (ret)
+ 		goto err_power_down;
+ 
+-	ov5693->streaming = !!enable;
+-
+ 	if (!enable)
+ 		pm_runtime_put(ov5693->dev);
+ 
+@@ -1196,13 +1190,6 @@ static int ov5693_configure_gpios(struct ov5693_device *ov5693)
+ 		return PTR_ERR(ov5693->powerdown);
+ 	}
+ 
+-	ov5693->privacy_led = devm_gpiod_get_optional(ov5693->dev, "privacy-led",
+-						      GPIOD_OUT_LOW);
+-	if (IS_ERR(ov5693->privacy_led)) {
+-		dev_err(ov5693->dev, "Error fetching privacy-led GPIO\n");
+-		return PTR_ERR(ov5693->privacy_led);
+-	}
+-
+ 	return 0;
+ }
+ 
+@@ -1229,7 +1216,8 @@ static int ov5693_check_hwcfg(struct ov5693_device *ov5693)
+ 
+ 	endpoint = fwnode_graph_get_next_endpoint(fwnode, NULL);
+ 	if (!endpoint)
+-		return -EPROBE_DEFER; /* Could be provided by cio2-bridge */
++		return dev_err_probe(ov5693->dev, -EPROBE_DEFER,
++				     "waiting for fwnode graph endpoint\n");
+ 
+ 	ret = v4l2_fwnode_endpoint_alloc_parse(endpoint, &bus_cfg);
+ 	fwnode_handle_put(endpoint);
